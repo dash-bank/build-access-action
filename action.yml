@@ -1,0 +1,36 @@
+name: Dash temporary build access
+description: Exchange GitHub Actions OIDC identity for temporary private-flake and cache access
+inputs:
+  access:
+    description: read for private inputs and downloads, publish for an approved cache writer
+    default: read
+  github-token:
+    description: Runtime workflow token used only to verify private pull-request origin
+    default: ${{ github.token }}
+  service-url:
+    description: HTTPS origin and OIDC audience of the build-access service
+    required: true
+  cache-url:
+    description: Expected HTTPS cache URL with one cache name
+    required: true
+  cache-public-key:
+    description: Expected Nix artifact verification public key
+    required: true
+  github-repository:
+    description: Expected owner/repository for the installation token; required for read access
+  github-repository-id:
+    description: Expected immutable numeric repository ID; required for read access
+outputs:
+  cache-url:
+    description: Authenticated cache URL
+  cache-expires-at:
+    description: Cache credential expiration in UTC
+  github-expires-at:
+    description: Private input credential expiration in UTC, when issued
+  cache-client:
+    description: Bundled dash-cache executable; push also requires attic on PATH
+runs:
+  using: node24
+  main: main.mjs
+  post: post.mjs
+  post-if: always()

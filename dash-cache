@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+action_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+: "${DASH_CACHE_SETTINGS:?Run the configured build-access Action before this cache client}"
+export DASH_CACHE_SETTINGS
+exec python3 "$action_root/dash-cache.py" "$@"
