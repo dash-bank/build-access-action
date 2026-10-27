@@ -1,10 +1,5 @@
 # Dash build access
 
-This directory is the complete source for the public `dash-bank/build-access-action`
-repository. Publish its contents at that repository's root and pin each consumer
-to the reviewed full commit SHA. This payload works without fetching executable
-code from a private repository.
-
 The Action exchanges a GitHub Actions OIDC proof for temporary access to a private
 GitHub input repository and Nix cache. It works in approved
 private repositories inside and outside the Dash organization. Access is granted
@@ -109,7 +104,11 @@ does not evaluate a private flake to obtain its cache client.
 | `cache-client`      | Absolute path to the bundled `dash-cache` executable.    |
 
 Deployment inputs have no defaults in the public source. Replace the configuration
-placeholders in a protected private workflow with reviewed literal values.
+placeholders with reviewed literal values in workflow YAML and pass them through
+`with`. A private workflow limits public disclosure. Branch protection is
+recommended for reviewing reader configuration changes; reader authorization
+does not require it. Publishing retains its separately enforced protected-branch
+and environment requirements.
 Missing or invalid inputs fail before an
 OIDC request. Repository IDs, URLs and artifact public keys are configuration,
 not credentials; they may appear in workflow logs and must not be treated as
@@ -146,16 +145,10 @@ configuration files are changed.
 
 ## Verification
 
-From the parent development repository:
-
-```sh
-tests/run-public-action.sh
-```
-
-The HTTP scenarios exercise OIDC exchange, request and response refusal,
+Maintainers validate this published payload in the development repository's
+integration harness before advancing consumer pins. Its HTTP scenarios exercise OIDC exchange, request and response refusal,
 repository scope, token masking, file permissions, cleanup and renewal. The
-Node test child executable stands in for host cache installation. The same
-command separately runs the existing cache CLI scenarios against this payload's
+Node test child executable stands in for host cache installation. The harness also runs the existing cache CLI scenarios against this payload's
 actual Python helper, using a real local HTTP service and temporary files.
 Host service-manager calls use a command-boundary substitute. These tests do not
 prove live Nix daemon setup, GitHub identity, or a signed cache restore. Run real
