@@ -1,32 +1,25 @@
 name: Dash temporary build access
-description: Exchange GitHub Actions OIDC identity for temporary private-flake and cache access
+description: Obtain temporary access to selected private flakes and Nix cache namespaces through GitHub OIDC
 inputs:
-  access:
-    description: read for private inputs and downloads, publish for an approved cache writer
-    default: read
+  service-url:
+    description: Reviewed HTTPS service origin and OIDC audience
+    required: true
+  flakes:
+    description: JSON map of source names to expected repository, repository_id and owner_id; empty means no source access
+    default: "{}"
+  caches:
+    description: JSON map of cache names to expected url, public_key and access (read or read-write); empty means no cache access
+    default: "{}"
   github-token:
     description: Runtime workflow token used only to verify private pull-request origin
     default: ${{ github.token }}
-  service-url:
-    description: HTTPS origin and OIDC audience of the build-access service
-    required: true
-  cache-url:
-    description: Expected HTTPS cache URL with one cache name
-    required: true
-  cache-public-key:
-    description: Expected Nix artifact verification public key
-    required: true
-  github-repository:
-    description: Expected owner/repository for the installation token; required for read access
-  github-repository-id:
-    description: Expected immutable numeric repository ID; required for read access
 outputs:
-  cache-url:
-    description: Authenticated cache URL
+  cache-urls:
+    description: Authenticated cache URLs, separated by newlines
   cache-expires-at:
-    description: Cache credential expiration in UTC
+    description: Cache credential expiration in UTC, when issued
   github-expires-at:
-    description: Private input credential expiration in UTC, when issued
+    description: Earliest private-source credential expiration in UTC, when issued
   cache-client:
     description: Bundled dash-cache executable; push also requires attic on PATH
 runs:
