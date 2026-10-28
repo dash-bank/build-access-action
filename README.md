@@ -8,8 +8,8 @@ Install Nix separately through an upstream installer.
 
 Pin the published Action to a reviewed full commit. Supply reviewed resource
 names, repository IDs, cache URLs and artifact keys through workflow configuration.
-The example values below are placeholders. This resource API must be published
-with its matching service before adoption; older Action revisions use a different contract.
+The example resource values below are placeholders. Use this Action with a
+service implementing the resource API; older Action revisions use a different contract.
 
 ```yaml
 permissions:
@@ -29,7 +29,7 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-      - uses: dash-bank/build-access-action@REVIEWED_RESOURCE_ACTION_COMMIT
+      - uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
         with:
           service-url: https://access.example
           flakes: |
@@ -75,7 +75,7 @@ after successful validation and the isolated build, in the publishing context
 required by policy. Do not carry credentials or executable state between jobs.
 
 ```yaml
-- uses: dash-bank/build-access-action@REVIEWED_RESOURCE_ACTION_COMMIT
+- uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
   id: publishing
   with:
     service-url: https://access.example
