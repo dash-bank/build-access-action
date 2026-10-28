@@ -21,6 +21,14 @@ the reviewed v3.24.1 binaries for Linux x86_64/ARM64 and macOS ARM64. An install
 update requires reviewing the release and hashes together. Other maintained
 installers can be used with equivalent integrity and credential controls.
 
+Set native `cache-mode: none` on the job to disable GitHub Actions archive
+cache reads and writes. GitHub scopes the job’s cache token and supplies the
+effective `ACTIONS_CACHE_MODE`; setting that environment variable alone is
+insufficient because the runner can overwrite it.
+A binary checksum does not protect other files extracted from a cached archive.
+The upstream Action still downloads and verifies the pinned raw binary. This
+setting does not disable Nix binary caches or the temporary Dash cache access.
+
 Replace `REVIEWED_ACTION_COMMIT` with the full 40-character build-access Action
 commit. Replace `REVIEWED_CHECKSUMS_COMMIT` with the full commit containing the
 manifest; the installer configuration is independent of the build-access revision:
@@ -34,6 +42,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    cache-mode: none
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -82,7 +91,8 @@ ownership marker.
 checks the protected branch, environment, caller identity, GitHub-hosted runner,
 and pinned reusable publishing workflow. Reader approval never grants uploads.
 
-Use a fresh publishing runner after successful validation. Build outputs without
+Set native `cache-mode: none` on the publishing job. Use a fresh publishing runner
+after successful validation. Build outputs without
 credentials using pure, sandboxed Nix evaluation and the existing publisher's
 OIDC-environment isolation. Obtain access only after those builds, through pinned
 controls. The bundled `dash-cache push` requires `attic` on `PATH`; install it
