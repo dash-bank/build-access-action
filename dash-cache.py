@@ -1,4 +1,6 @@
-"""Authenticate Dash's private binary cache without putting secrets in Nix."""
+"""Authenticate private binary caches without putting secrets in Nix."""
+
+from __future__ import annotations
 
 import argparse
 import base64
@@ -31,8 +33,10 @@ class Cache:
         return f"{self.endpoint}/{self.name}"
 
 
-def load_cache() -> Cache:
-    settings = json.loads(Path(os.environ["DASH_CACHE_SETTINGS"]).read_text())
+def load_cache(settings: dict[str, object] | None = None) -> Cache:
+    from_registry = settings is not None
+    if settings is None:
+        settings = json.loads(Path(os.environ["DASH_CACHE_SETTINGS"]).read_text())
     key = settings.get("public_key")
     if not isinstance(key, str) or not re.fullmatch(r"[\w-]+:[A-Za-z0-9+/]{43}=", key):
         raise ValueError(
@@ -43,9 +47,13 @@ def load_cache() -> Cache:
     name = settings["cache"]
     if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
         raise ValueError("Invalid cache name.")
-    endpoint = os.environ.get(
-        "DASH_CACHE_ENDPOINT",
-        settings.get("endpoint") or f"https://{settings['app']}.fly.dev",
+    configured_endpoint = (
+        settings.get("endpoint") or f"https://{settings['app']}.fly.dev"
+    )
+    endpoint = (
+        configured_endpoint
+        if from_registry
+        else os.environ.get("DASH_CACHE_ENDPOINT", configured_endpoint)
     ).rstrip("/")
     parsed = urllib.parse.urlsplit(endpoint)
     local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
@@ -270,6 +278,12 @@ def restart_nix_daemon(sudo: list[str]) -> None:
 
 
 def setup(cache: Cache, root: Path, args: argparse.Namespace) -> None:
+    configure([cache], root, args, named=False)
+
+
+def configure(
+    caches: list[Cache], root: Path, args: argparse.Namespace, *, named: bool
+) -> None:
     if args.token_file:
         token = Path(args.token_file).read_text().strip()
     elif not sys.stdin.isatty():
@@ -280,7 +294,8 @@ def setup(cache: Cache, root: Path, args: argparse.Namespace) -> None:
         raise ValueError(
             "Provide one nonempty cache token via prompt, stdin, or --token-file."
         )
-    verify(cache, token)
+    for cache in caches:
+        verify(cache, token)
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
     user_conf = config_home / "nix/nix.conf"
     system_conf = Path("/etc/nix/nix.conf")
@@ -304,21 +319,25 @@ def setup(cache: Cache, root: Path, args: argparse.Namespace) -> None:
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
     write_private(root / "token", token + "\n")
-    host = urllib.parse.urlsplit(cache.endpoint).hostname
-    write_private(root / "netrc", f"machine {host} login token password {token}\n")
+    hosts = sorted({urllib.parse.urlsplit(cache.endpoint).hostname for cache in caches})
+    write_private(
+        root / "netrc",
+        "".join(f"machine {host} login token password {token}\n" for host in hosts),
+    )
     # An isolated Attic config preserves any personal servers. token-file keeps
     # credentials out of process arguments, shell history and the Nix store.
     write_private(
         root / "attic/config.toml",
-        (
-            f"[servers.dash]\nendpoint = {json.dumps(cache.endpoint + '/')}\n"
+        "".join(
+            f"[servers.{cache.name if named else 'dash'}]\nendpoint = {json.dumps(cache.endpoint + '/')}\n"
             f"token-file = {json.dumps(str(root / 'token'))}\n"
+            for cache in caches
         ),
     )
     netrc = str(root / "netrc") if args.user_only else "/etc/nix/dash-cache.netrc"
     fragment = (
-        f"extra-substituters = {cache.url}\n"
-        f"extra-trusted-public-keys = {cache.public_key}\n"
+        f"extra-substituters = {' '.join(cache.url for cache in caches)}\n"
+        f"extra-trusted-public-keys = {' '.join(cache.public_key for cache in caches)}\n"
         f"netrc-file = {netrc}\n"
     )
     write_private(root / "nix.conf", fragment)
@@ -392,18 +411,42 @@ def main() -> int:
         "status", help="verify credentials and published cache identity"
     )
     status_parser.add_argument("--offline", action="store_true")
+    status_parser.add_argument("--cache")
     push_parser = commands.add_parser(
         "push", help="upload explicit store paths and their closures; CI token required"
     )
     push_parser.add_argument("paths", nargs="+")
+    push_parser.add_argument("--cache")
     args = parser.parse_args()
-    cache = load_cache()
+    settings = json.loads(Path(os.environ["DASH_CACHE_SETTINGS"]).read_text())
+    named = "caches" in settings
+    if named:
+        registry = settings["caches"]
+        if not isinstance(registry, dict) or not registry:
+            raise ValueError("Expected at least one configured cache.")
+        caches = {name: load_cache(value) for name, value in registry.items()}
+        if any(name != cache.name for name, cache in caches.items()):
+            raise ValueError("Cache names must match their registry keys.")
+        if len({cache.endpoint for cache in caches.values()}) != 1:
+            raise ValueError("Cache configuration requires one credential origin.")
+        selected = getattr(args, "cache", None)
+        if args.command != "setup" and selected is None and len(caches) != 1:
+            raise ValueError("Select a configured namespace with --cache NAME.")
+        if selected is not None and selected not in caches:
+            raise ValueError("Unknown configured cache.")
+        cache = caches[selected] if selected else next(iter(caches.values()))
+    else:
+        cache = load_cache()
+        caches = {cache.name: cache}
     root = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         / "dash-dev-env/cache"
     )
     if args.command == "setup":
-        setup(cache, root, args)
+        if named:
+            configure(list(caches.values()), root, args, named=True)
+        else:
+            setup(cache, root, args)
     else:
         if not (root / "token").exists():
             raise ValueError(
@@ -424,7 +467,12 @@ def main() -> int:
                     "push accepts /nix/store paths; build first with nix build --print-out-paths."
                 )
             run(
-                ["attic", "push", f"dash:{cache.name}", *args.paths],
+                [
+                    "attic",
+                    "push",
+                    f"{cache.name if named else 'dash'}:{cache.name}",
+                    *args.paths,
+                ],
                 env=dict(os.environ, XDG_CONFIG_HOME=str(root)),
             )
     return 0

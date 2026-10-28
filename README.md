@@ -1,191 +1,111 @@
-# Dash build access
+# Temporary build access
 
-The Action exchanges a GitHub Actions OIDC proof for temporary access to a private
-GitHub input repository and Nix cache. It works in approved
-private repositories inside and outside the Dash organization. Access is granted
-by the service's explicit repository, owner, workflow, branch and event policy;
-installing the Action grants no access by itself. CI stores no App key or cache
-token.
+Exchange GitHub Actions OIDC identity for selected private GitHub sources and Nix
+cache permissions. Server policy decides access. Installing this Action grants nothing.
+Install Nix separately through an upstream installer.
 
-## Read private inputs
+## Configure
 
-Use an ephemeral GitHub-hosted runner. Python 3 and Nix must be installed before
-the exchange. The workflow owns Nix installation; this Action only configures
-temporary build access. Use an upstream installer directly, pinned to a reviewed
-commit and release, without persisting a GitHub token in Nix's configuration.
-
-This example uses the Determinate Systems installer for upstream Nix. The
-`determinate: false` setting preserves upstream Nix, a mode the installer vendor
-does not support. The build-access Action does not require a particular Nix
-distribution. The
-[example checksum manifest](examples/nix-installer-v3.24.1.sha256) is data for
-the upstream installer's verifier, not an installer Action. Its hashes preserve
-the reviewed v3.24.1 binaries for Linux x86_64/ARM64 and macOS ARM64. An installer
-update requires reviewing the release and hashes together. Other maintained
-installers can be used with equivalent integrity and credential controls.
-
-Set native `cache-mode: none` on the job to disable GitHub Actions archive
-cache reads and writes. GitHub scopes the job’s cache token and supplies the
-effective `ACTIONS_CACHE_MODE`; setting that environment variable alone is
-insufficient because the runner can overwrite it.
-A binary checksum does not protect other files extracted from a cached archive.
-The upstream Action still downloads and verifies the pinned raw binary. This
-setting does not disable Nix binary caches or the temporary Dash cache access.
-
-Replace `REVIEWED_ACTION_COMMIT` with the full 40-character build-access Action
-commit. Replace `REVIEWED_CHECKSUMS_COMMIT` with the full commit containing the
-manifest; the installer configuration is independent of the build-access revision:
+Pin the published Action to a reviewed full commit. Supply reviewed resource
+names, repository IDs, cache URLs and artifact keys through workflow configuration.
+The example resource values below are placeholders. Use this Action with a
+service implementing the resource API; older Action revisions use a different contract.
 
 ```yaml
 permissions:
   contents: read
   id-token: write
-  pull-requests: read # Needed when the policy permits same-repository PRs.
+  pull-requests: read # when private same-repository PRs are allowed
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
     cache-mode: none
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          determinate: false
-          github-token: ""
-          source-tag: v3.24.1
-          source-checksums-url: https://raw.githubusercontent.com/dash-bank/build-access-action/REVIEWED_CHECKSUMS_COMMIT/examples/nix-installer-v3.24.1.sha256
-          source-checksums-sha256: e5406a23403be8ce96ce5543c26f16821abdd211960497f704e631207a84eaec
-      - name: Verify Nix has no saved access tokens
-        run: |
-          nix config show --json | python3 -c '
-          import json, sys
-          if json.load(sys.stdin)["access-tokens"]["value"]:
-              raise SystemExit("Nix must not retain access tokens on this runner")
-          '
-      - uses: dash-bank/build-access-action@REVIEWED_ACTION_COMMIT
+          github_access_token: ${{ github.token }}
+      - uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
         with:
-          service-url: REPLACE_WITH_REVIEWED_SERVICE_ORIGIN
-          github-repository: REPLACE_WITH_PRIVATE_OWNER_AND_REPOSITORY
-          github-repository-id: REPLACE_WITH_IMMUTABLE_REPOSITORY_ID
-          cache-url: REPLACE_WITH_REVIEWED_CACHE_URL
-          cache-public-key: REPLACE_WITH_REVIEWED_ARTIFACT_PUBLIC_KEY
-      - run: nix flake check --print-build-logs
+          service-url: https://access.example
+          flakes: |
+            {"shared-ui":{"repository":"example/shared-ui","repository_id":"12345","owner_id":"67890"}}
+          caches: |
+            {"shared":{"url":"https://cache.example/shared","public_key":"REVIEWED_KEY","access":"read"}}
+      - run: nix build .#application
 ```
 
-The build-access Action runs before private input evaluation. It verifies the returned installation token's single target repository
-and immutable ID, checks cache identity and deadlines, and uses bundled cache
-setup code. It never follows service redirects or prints provider response
-bodies. Credential files have mode 600; their containing delivery directory has
-mode 700. GitHub masks the proof and issued credentials before further processing.
+| Input          | Meaning                                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| `service-url`  | Required HTTPS service origin and OIDC audience                                                         |
+| `flakes`       | JSON map of registered source names to expected `repository`, `repository_id`, `owner_id`; default `{}` |
+| `caches`       | JSON map of cache names to expected `url`, `public_key`, `access`; default `{}`                         |
+| `github-token` | Runtime workflow token for private PR verification; defaults to `github.token`                          |
 
-The post-job hook revokes the installation token and removes the private delivery
-and cache credential files. Expiration remains the final bound when a runner is
-forcibly terminated. Run the Action again to renew credentials during a long job;
-an older post hook preserves files owned by the newer invocation. If a renewal
-fails before replacing daemon credentials, the earlier post hook still removes
-its exact credential even if the newer invocation already removed the shared
-ownership marker.
+Request at least one resource. Each cache requests `read` or `read-write`.
+Omit `flakes` for cache-only access. Omit `caches` for source-only access.
+Several sources and caches can be requested together; the complete request must be authorized.
+Caches must share one canonical origin because one credential covers their namespace permissions.
+All names resolve through server-owned configuration. IDs and trust anchors cannot
+come from PR content, dispatch input or the exchange response.
 
-## Publish cache outputs
+## Adopt from cachix/install-nix-action
 
-`access: publish` requests cache read/write access only.
-The service requires a separate writer rule for the signed caller identity.
-Policy can trust matching workflows or require protected-branch, environment,
-GitHub-hosted runner and pinned reusable-workflow controls.
-Reader approval never grants uploads.
+Keep Cachix with `github_access_token: ${{ github.token }}` and a reviewed full
+commit, as shown above. Run this Action after installation and before evaluating
+private inputs. No token-removal step or switch to another installer is required.
+Another installer is supported when it provides upstream Nix >= 2.34.
 
-Set native `cache-mode: none` on the publishing job. Use a fresh publishing runner
-after successful validation. Build outputs without
-credentials using pure, sandboxed Nix evaluation and the existing publisher's
-OIDC-environment isolation. Obtain access only after those builds, through pinned
-controls. The bundled `dash-cache push` requires `attic` on `PATH`; install it
-from a reviewed public Nix input before obtaining the writer grant. This Action
-does not evaluate a private flake to obtain its cache client.
+The installer token remains configured for normal GitHub fetches. It cannot read
+other private repositories. This Action adds a separate repository-scoped token
+for each approved source; Nix selects the longest matching prefix.
+An unowned token at an exact requested repository prefix is refused before exchange.
+Renewal replaces only Action-owned source tokens and preserves other credentials.
+Keep this Action's default `github-token` for private PR verification.
+Use the temporary job token; do not add a PAT or deploy key.
+
+## Build and upload
+
+Obtain source/cache reads before evaluating the flake. Request cache writes only
+after successful validation and the isolated build, in the publishing context
+required by policy. Do not carry credentials or executable state between jobs.
 
 ```yaml
-- name: Obtain temporary cache writer
-  id: access
-  uses: dash-bank/build-access-action@REVIEWED_ACTION_COMMIT
+- uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
+  id: publishing
   with:
-    access: publish
-    service-url: REPLACE_WITH_REVIEWED_SERVICE_ORIGIN
-    cache-url: REPLACE_WITH_REVIEWED_CACHE_URL
-    cache-public-key: REPLACE_WITH_REVIEWED_ARTIFACT_PUBLIC_KEY
-- name: Upload completed outputs
+    service-url: https://access.example
+    caches: |
+      {"project":{"url":"https://cache.example/project","public_key":"REVIEWED_KEY","access":"read-write"}}
+- shell: bash
   env:
-    CACHE_CLIENT: ${{ steps.access.outputs.cache-client }}
-  run: '"$CACHE_CLIENT" push /nix/store/REPLACE_WITH_COMPLETED_OUTPUT'
+    CACHE_CLIENT: ${{ steps.publishing.outputs.cache-client }}
+  run: '"$CACHE_CLIENT" push --cache project /nix/store/REVIEWED_BUILT_STORE_PATH'
 ```
 
-## Inputs and outputs
+`dash-cache status --cache NAME` verifies a configured namespace.
+`dash-cache push --cache NAME PATH...` uploads explicit built store paths and closures;
+`attic` must already be installed. Selection is required when several caches are configured.
+Permissions apply to the entire namespace. Source files included in uploaded
+closures are readable by everyone who can read that namespace.
 
-| Input                  | Requirement           | Purpose                                                               |
-| ---------------------- | --------------------- | --------------------------------------------------------------------- |
-| `access`               | Defaults to `read`    | Request reader access or separately authorized `publish` access.      |
-| `github-token`         | `${{ github.token }}` | Runtime token sent only for private PR metadata verification.         |
-| `service-url`          | Required              | Reviewed HTTPS service origin and exact OIDC audience.                |
-| `github-repository`    | Required for `read`   | Expected private input repository in `owner/name` form.               |
-| `github-repository-id` | Required for `read`   | Expected immutable numeric ID of that repository.                     |
-| `cache-url`            | Required              | Expected HTTPS cache URL, consisting of an origin and one cache name. |
-| `cache-public-key`     | Required              | Expected Nix artifact verification public key in `name:base64` form.  |
+## Runtime and cleanup
 
-| Output              | Meaning                                                  |
-| ------------------- | -------------------------------------------------------- |
-| `cache-url`         | Verified private cache endpoint.                         |
-| `cache-expires-at`  | UTC expiration; renew before it.                         |
-| `github-expires-at` | UTC installation token expiration, empty for publishers. |
-| `cache-client`      | Absolute path to the bundled `dash-cache` executable.    |
+Use fresh GitHub-hosted Linux/macOS runners with Python 3 and upstream Nix.
+Source access requires Nix >= 2.34 for [repository-specific token prefixes](https://nix.dev/manual/nix/2.34/command-ref/conf-file#conf-access-tokens).
+The Action preserves existing Nix access tokens and refuses unowned exact repository-prefix conflicts.
+Use the GitHub flake fetcher (`github:OWNER/REPO`); SSH inputs need separate authentication.
+Each returned source token is independently checked for exact repository scope.
+Post-job cleanup revokes only received source tokens and removes owned private files
+and matching daemon credentials. Credentials never belong in flake URLs, lockfiles,
+derivations, artifacts, command arguments or logs.
+Repeat the Action before expiration. Renewal may replace only Action-owned cache files.
+A failed request fails the job; do not use `continue-on-error` for access setup.
 
-Deployment inputs have no defaults in the public source. Replace the configuration
-placeholders with reviewed literal values in workflow YAML and pass them through
-`with`. A private workflow limits public disclosure. Branch protection is
-recommended for reviewing reader configuration changes; reader authorization
-does not require it. Isolated publishing retains its separately enforced protected-branch
-and environment requirements.
-Missing or invalid inputs fail before an
-OIDC request. Repository IDs, URLs and artifact public keys are configuration,
-not credentials; they may appear in workflow logs and must not be treated as
-secrets. The public payload contains no deployment identifiers or cache settings.
-
-Prefer checked-in private workflow values when branch protection and code-owner
-review protect configuration changes. Repository configuration variables can be
-edited by repository writers without a workflow change; use them only when those
-writers are trusted to change the service and artifact verification key.
-
-These inputs are independent trust anchors. Never obtain them from a pull request,
-an untrusted dispatch input or the exchange response. The Action compares the
-returned cache URL/public key and repository name/ID against caller configuration.
-The service cannot choose a different cache or repository through its response.
-Review configuration and artifact public-key changes as carefully as workflow
-changes. Parameterization reduces public disclosure; service policy still owns
-authorization.
-
-The Action writes a mode-600 cache settings file inside its private runtime
-directory and exports its path and pinned endpoint for later `dash-cache` steps.
-The bundled client requires that runtime configuration and ships no fallback
-cache identity. Its post-job cleanup removes the settings with the owning
-invocation's credentials. Earlier cleanup preserves a newer invocation's files.
-
-Authenticated cache metadata is capped at 128 KiB before JSON parsing. One owned
-Python worker uses the existing verified-TLS, no-redirect urllib request, and
-returns only an identity verdict over a private pipe. The parent and worker
-enforce the same absolute 30-second deadline, including DNS, TLS, headers and
-response reads. The worker's OS alarm closes its socket and inherited output
-pipes by that deadline even if the parent is killed. SIGTERM or SIGINT to the
-parent also terminates and reaps the worker; bounded reaping can add at most two
-seconds. A failed or timed-out check completes before existing credential or
-configuration files are changed.
-
-## Verification
-
-In the private maintainer checkout, run
-`nix develop --command bash tests/run-public-action.sh` before advancing consumer
-pins. Its HTTP scenarios exercise OIDC exchange, request and response refusal,
-repository scope, token masking, file permissions, cleanup and renewal. The
-Node test child executable stands in for host cache installation. The harness also runs the existing cache CLI scenarios against this payload's
-actual Python helper, using a real local HTTP service and temporary files.
-Host service-manager calls use a command-boundary substitute. These tests do not
-prove live Nix daemon setup, GitHub identity, or a signed cache restore. Run real
-private-repository CI and restore a signed artifact before production cutover.
+Outputs: `cache-urls` (newline-separated), `cache-expires-at`, `github-expires-at`
+(earliest source expiration), and `cache-client`. Credential values are never outputs.
+Developer login, cache administration and Nix installation remain separate.

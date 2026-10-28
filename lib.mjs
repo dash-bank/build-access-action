@@ -37,30 +37,48 @@ function origin(value) {
   return url.origin;
 }
 
-function configuration(env, access) {
+function record(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function fields(value, expected) {
+  return record(value) && Object.keys(value).length === expected.length && expected.every(name => Object.hasOwn(value, name));
+}
+
+function resourceMap(env, name) {
+  let value;
+  try { value = JSON.parse(input(env, name, '{}')); } catch { throw new Error(`Invalid ${name} configuration`); }
+  if (!record(value) || Object.keys(value).some(name => !/^[A-Za-z0-9_.-]{1,100}$/.test(name) || ['.', '..'].includes(name))) throw new Error(`Invalid ${name} resource names`);
+  return value;
+}
+
+function identifier(value) {
+  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value));
+}
+
+function configuration(env) {
   const broker = origin(input(env, 'service-url'));
-  let cacheURL;
-  try { cacheURL = new URL(input(env, 'cache-url')); } catch { throw new Error('Cache configuration requires an HTTPS cache URL'); }
-  if (cacheURL.protocol !== 'https:' || cacheURL.username || cacheURL.password || cacheURL.search || cacheURL.hash || !/^\/[A-Za-z0-9_-]+$/.test(cacheURL.pathname)) {
-    throw new Error('Cache configuration requires an HTTPS URL with one cache name');
+  const flakes = resourceMap(env, 'flakes');
+  const caches = resourceMap(env, 'caches');
+  const count = Object.keys(flakes).length + Object.keys(caches).length;
+  if (!count || count > 16) throw new Error('Configuration requires one to sixteen resources');
+  const repositories = new Set();
+  for (const target of Object.values(flakes)) {
+    if (!fields(target, ['repository', 'repository_id', 'owner_id']) || typeof target.repository !== 'string' || !/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(target.repository) || !identifier(target.repository_id) || !identifier(target.owner_id) || repositories.has(target.repository_id)) throw new Error('Flake configuration requires unique repository names and immutable IDs');
+    repositories.add(target.repository_id);
   }
-  const publicKey = input(env, 'cache-public-key');
-  const encodedKey = publicKey.split(':')[1];
-  if (!/^[A-Za-z0-9_-]+:[A-Za-z0-9+/]{43}=$/.test(publicKey) || /\s/.test(publicKey) || Buffer.from(encodedKey || '', 'base64').toString('base64') !== encodedKey) {
-    throw new Error('Cache configuration requires a valid artifact public key');
+  for (const [name, cache] of Object.entries(caches)) {
+    if (!fields(cache, ['url', 'public_key', 'access']) || !['read', 'read-write'].includes(cache.access)) throw new Error('Invalid cache configuration');
+    let url;
+    try { url = new URL(cache.url); } catch { throw new Error('Cache configuration requires HTTPS'); }
+    if (!/^[A-Za-z0-9_-]+$/.test(name) || url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== `/${name}` || url.href !== cache.url) throw new Error('Cache configuration requires an HTTPS URL with its registered cache name');
+    const publicKey = cache.public_key;
+    const encodedKey = typeof publicKey === 'string' ? publicKey.split(':')[1] : '';
+    if (typeof publicKey !== 'string' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9+/]{43}=$/.test(publicKey) || Buffer.from(encodedKey || '', 'base64').toString('base64') !== encodedKey) throw new Error('Cache configuration requires a valid artifact public key');
   }
-  const repository = input(env, 'github-repository');
-  const repositoryId = input(env, 'github-repository-id');
-  if (access === 'read' && (!/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repository) || /\s/.test(repository) || !/^[1-9][0-9]*$/.test(repositoryId) || !Number.isSafeInteger(Number(repositoryId)))) {
-    throw new Error('Reader configuration requires a repository name and immutable numeric repository ID');
-  }
-  return {
-    broker, repository, repositoryId: Number(repositoryId),
-    cacheURL: `${cacheURL.origin}${cacheURL.pathname}`,
-    // Python's urlsplit hostname and netrc omit IPv6 URL brackets.
-    cacheHost: cacheURL.hostname.startsWith('[') ? cacheURL.hostname.slice(1, -1) : cacheURL.hostname,
-    cache: { endpoint: cacheURL.origin, cache: cacheURL.pathname.slice(1), public_key: publicKey },
-  };
+  const cacheOrigins = new Set(Object.values(caches).map(cache => new URL(cache.url).origin));
+  if (cacheOrigins.size > 1) throw new Error('Cache configuration requires one credential origin');
+  return { broker, flakes, caches };
 }
 
 async function exists(file) {
@@ -122,7 +140,8 @@ async function loadState(directory, env) {
   if ((await realpath(directory)) !== directory || !(await lstat(directory)).isDirectory()) {
     throw new Error('Refusing an invalid build-access cleanup directory');
   }
-  return JSON.parse(await readFile(path.join(directory, 'credentials.json'), 'utf8'));
+  try { return JSON.parse(await readFile(path.join(directory, 'credentials.json'), 'utf8')); }
+  catch { throw new Error('Cannot read temporary credential cleanup state'); }
 }
 
 async function prepareCacheRoot(cacheRoot, env) {
@@ -158,7 +177,7 @@ async function removeOwnedCache(state, directory, env, systemNetrc) {
   if (owner && owner !== directory) {
     const current = await loadState(owner, env);
     tokenOwnedByNewerInvocation = current?.cacheRoot === state.cacheRoot
-      && current?.cache_host === state.cache_host && current?.cache_token === state.cache_token;
+      && JSON.stringify(current?.cache_hosts) === JSON.stringify(state.cache_hosts) && current?.cache_token === state.cache_token;
   }
   if (!tokenOwnedByNewerInvocation && state.cache_token && await exists(systemNetrc)) {
     let current;
@@ -166,7 +185,7 @@ async function removeOwnedCache(state, directory, env, systemNetrc) {
       if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
       current = (await runCommand('sudo', ['-n', 'cat', systemNetrc], env, 'Cache credential cleanup')).stdout;
     }
-    const expected = `machine ${state.cache_host} login token password ${state.cache_token}\n`;
+    const expected = state.cache_hosts.map(host => `machine ${host} login token password ${state.cache_token}\n`).join('');
     if (current === expected) {
       try { await unlink(systemNetrc); } catch (error) {
         if (error.code !== 'EACCES' && error.code !== 'EPERM') throw error;
@@ -182,14 +201,18 @@ export async function cleanup(env = process.env, options = {}) {
   if (!directory) return;
   const state = await loadState(directory, env);
   if (!state) return;
+  return cleanupState(directory, state, env, options);
+}
+
+async function cleanupState(directory, state, env, options) {
   let failed = false;
-  try {
-    if (state.github_token) {
+  for (const token of new Set(state.github_tokens || [])) {
+    try {
       await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/token`, {
-        method: 'DELETE', headers: { ...apiHeaders, Authorization: `Bearer ${state.github_token}` }, empty: true, acceptUnauthorized: true,
+        method: 'DELETE', headers: { ...apiHeaders, Authorization: `Bearer ${token}` }, empty: true, acceptUnauthorized: true,
       });
-    }
-  } catch { failed = true; }
+    } catch { failed = true; }
+  }
   try {
     if (state.cacheRoot) await removeOwnedCache(state, directory, env, options.systemNetrc || '/etc/nix/dash-cache.netrc');
   } catch { failed = true; }
@@ -199,106 +222,125 @@ export async function cleanup(env = process.env, options = {}) {
 
 export async function run(env = process.env, options = {}) {
   const log = options.log || ((line) => process.stdout.write(`${line}\n`));
-  if (env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted') {
-    throw new Error('Build access requires an ephemeral GitHub-hosted runner');
+  if (env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted') throw new Error('Build access requires an ephemeral GitHub-hosted runner');
+  if (!env.RUNNER_TEMP || !env.HOME || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || !env.ACTIONS_ID_TOKEN_REQUEST_URL) throw new Error('GitHub OIDC is unavailable; grant id-token: write to this job');
+  const expected = configuration(env);
+  const hasSources = Object.keys(expected.flakes).length > 0;
+  const hasCaches = Object.keys(expected.caches).length > 0;
+  const version = await runCommand('nix', ['--version'], env, 'Installed Nix check');
+  let savedTokens = {}, ownedTokens = {};
+  if (hasSources) {
+    const match = version.stdout.match(/^nix \(Nix\) (\d+)\.(\d+)/);
+    if (!match || Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 34)) throw new Error('Source access requires upstream Nix 2.34 or newer for repository-specific credentials');
+    try { savedTokens = JSON.parse((await runCommand('nix', ['config', 'show', '--json'], env, 'Nix credential check')).stdout)['access-tokens'].value; } catch { throw new Error('Cannot verify Nix access tokens'); }
+    if (!record(savedTokens) || Object.entries(savedTokens).some(([prefix, token]) => !/^[^\s=#]+$/.test(prefix) || typeof token !== 'string' || /[\s#]/.test(token))) throw new Error('Cannot safely preserve Nix access tokens');
+    for (const token of new Set(Object.values(savedTokens))) if (token) mask(log, token);
+    if (env.DASH_BUILD_ACCESS_SOURCE_STATE) {
+      const previous = (await loadState(env.DASH_BUILD_ACCESS_SOURCE_STATE, env))?.nixTokens;
+      if (record(previous)) ownedTokens = Object.fromEntries(Object.entries(savedTokens).filter(([prefix, token]) => Object.hasOwn(previous, prefix) && previous[prefix] === token));
+    }
+    for (const target of Object.values(expected.flakes)) {
+      const prefix = `github.com/${target.repository}`;
+      if (Object.hasOwn(savedTokens, prefix) && ownedTokens[prefix] !== savedTokens[prefix]) throw new Error('Refusing an existing repository credential not owned by this Action');
+    }
   }
-  if (!env.RUNNER_TEMP || !env.HOME || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || !env.ACTIONS_ID_TOKEN_REQUEST_URL) {
-    throw new Error('GitHub OIDC is unavailable; grant id-token: write to this job');
-  }
-  const access = input(env, 'access', 'read');
-  if (!['read', 'publish'].includes(access)) throw new Error('Build access must be read or publish');
-  const expected = configuration(env, access);
-  await runCommand('nix', ['--version'], env, 'Installed Nix check');
-  const broker = expected.broker;
   const oidcURL = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
-  // GitHub's request endpoint is runner-specific; the signed token's issuer is
-  // separately verified by the gateway. The toolkit likewise uses this URL
-  // supplied by the runner, rather than constructing it from the issuer.
   const fixtureOrigin = options.endpoints?.oidcOrigin;
   const githubOIDC = oidcURL.protocol === 'https:' && oidcURL.hostname.endsWith('.actions.githubusercontent.com') && !oidcURL.port && !oidcURL.username && !oidcURL.password && !oidcURL.hash;
-  if (fixtureOrigin ? oidcURL.origin !== fixtureOrigin : !githubOIDC) {
-    throw new Error('Unexpected GitHub OIDC endpoint');
-  }
-  oidcURL.searchParams.set('audience', broker);
-  const cacheRoot = path.join(env.XDG_CONFIG_HOME || path.join(env.HOME, '.config'), 'dash-dev-env/cache');
-  if (!path.isAbsolute(cacheRoot)) throw new Error('Cache configuration directory must be absolute');
-  const renewsOwnedCache = await prepareCacheRoot(cacheRoot, env);
-  if (!renewsOwnedCache && await exists(options.systemNetrc || '/etc/nix/dash-cache.netrc')) {
-    throw new Error('Refusing existing daemon cache credentials; use an ephemeral runner');
+  if (fixtureOrigin ? oidcURL.origin !== fixtureOrigin : !githubOIDC) throw new Error('Unexpected GitHub OIDC endpoint');
+  oidcURL.searchParams.set('audience', expected.broker);
+  const cacheRoot = hasCaches ? path.join(env.XDG_CONFIG_HOME || path.join(env.HOME, '.config'), 'dash-dev-env/cache') : undefined;
+  if (hasCaches) {
+    if (!path.isAbsolute(cacheRoot)) throw new Error('Cache configuration directory must be absolute');
+    const renewsOwnedCache = await prepareCacheRoot(cacheRoot, env);
+    if (!renewsOwnedCache && await exists(options.systemNetrc || '/etc/nix/dash-cache.netrc')) throw new Error('Refusing existing daemon cache credentials; use an ephemeral runner');
   }
   const stateDirectory = await mkdtemp(path.join(await realpath(env.RUNNER_TEMP), 'dash-build-access-'));
   await chmod(stateDirectory, 0o700);
   const stateFile = path.join(stateDirectory, 'credentials.json');
-  const state = { cacheRoot };
+  const state = { cacheRoot, github_tokens: [] };
   await privateWrite(stateFile, JSON.stringify(state));
   await appendWorkflow(env.GITHUB_STATE, 'directory', stateDirectory);
   try {
     const identity = await jsonRequest(oidcURL, { headers: { Authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
     const proof = secret(identity?.value, 'OIDC');
     mask(log, proof);
-    const payload = { access };
+    const payload = { flakes: Object.keys(expected.flakes), caches: Object.fromEntries(Object.entries(expected.caches).map(([name, cache]) => [name, cache.access])) };
     if (env.GITHUB_EVENT_NAME === 'pull_request') payload.github_token = secret(input(env, 'github-token'), 'workflow');
-    const grant = await jsonRequest(`${options.endpoints?.broker || broker}/v1/exchange`, {
-      method: 'POST', headers: { Authorization: `Bearer ${proof}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-    });
-    // Mask all received credentials before validating anything that may fail.
-    for (const field of ['github_token', 'cache_token']) if (typeof grant?.[field] === 'string') mask(log, grant[field]);
-    if (grant?.github_token) {
-      state.github_token = secret(grant.github_token, 'GitHub');
-      await privateWrite(stateFile, JSON.stringify(state));
+    const grant = await jsonRequest(`${options.endpoints?.broker || expected.broker}/v1/exchange`, { method: 'POST', headers: { Authorization: `Bearer ${proof}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    // Capture and mask every returned source token before validating the grant,
+    // including unexpected resources, so refusal can revoke all usable tokens.
+    if (typeof grant?.cache_token === 'string') mask(log, grant.cache_token);
+    const receivedSources = grant?.flakes && typeof grant.flakes === 'object' ? Object.values(grant.flakes) : [];
+    for (const source of receivedSources) if (typeof source?.token === 'string') mask(log, source.token);
+    let invalidSourceCredential = false;
+    for (const source of receivedSources) if (typeof source?.token === 'string') {
+      try { state.github_tokens.push(secret(source.token, 'GitHub')); }
+      catch { invalidSourceCredential = true; }
     }
-    const expectedFields = ['cache_token', 'cache_expires_at', 'cache_url', 'cache_public_key', ...(access === 'read' ? ['github_token', 'github_expires_at'] : [])];
-    if (!grant || typeof grant !== 'object' || Array.isArray(grant) || Object.keys(grant).some((field) => !expectedFields.includes(field)) || expectedFields.some((field) => typeof grant[field] !== 'string')) {
-      throw new Error('Build access returned an unexpected credential response');
-    }
-    if (access === 'read' && !state.github_token) throw new Error('Build access omitted its GitHub credential');
-    const cacheToken = secret(grant?.cache_token, 'cache');
-    state.cache_token = cacheToken;
+    // Capture the complete token set before any persistence can fail. The catch
+    // path revokes from memory even when the private state file is unavailable.
     await privateWrite(stateFile, JSON.stringify(state));
-    const cacheExpires = expires(grant.cache_expires_at, 'cache', 1830000);
-    const githubExpires = state.github_token ? expires(grant.github_expires_at, 'GitHub', 3630000) : '';
-    const settings = expected.cache;
-    if (grant.cache_url !== expected.cacheURL || grant.cache_public_key !== settings.public_key) {
-      throw new Error('Build access returned an unexpected cache identity');
+    if (invalidSourceCredential) throw new Error('Invalid GitHub credential received');
+    const topFields = ['flakes', 'caches', ...(hasCaches ? ['cache_token', 'cache_expires_at'] : [])];
+    if (!fields(grant, topFields) || !fields(grant.flakes, Object.keys(expected.flakes)) || !fields(grant.caches, Object.keys(expected.caches))) throw new Error('Build access returned an unexpected credential response');
+    const githubExpirations = [];
+    state.nixTokens = { ...ownedTokens };
+    for (const [name, target] of Object.entries(expected.flakes)) {
+      const source = grant.flakes[name];
+      if (!fields(source, ['repository', 'repository_id', 'owner_id', 'token', 'expires_at']) || source.repository !== target.repository || source.repository_id !== target.repository_id || source.owner_id !== target.owner_id) throw new Error('GitHub credential has unexpected repository scope');
+      githubExpirations.push(expires(source.expires_at, 'GitHub', 3630000));
+      const token = secret(source.token, 'GitHub');
+      const scope = await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/repositories`, { headers: { ...apiHeaders, Authorization: `Bearer ${token}` } });
+      if (scope?.total_count !== 1 || !Array.isArray(scope.repositories) || scope.repositories.length !== 1 || scope.repositories[0]?.full_name !== target.repository || scope.repositories[0]?.id !== Number(target.repository_id)) throw new Error('GitHub credential has unexpected repository scope');
+      if (token.includes('#')) throw new Error('Invalid GitHub credential received');
+      state.nixTokens[`github.com/${target.repository}`] = token;
     }
-    state.cache_host = expected.cacheHost;
-    await privateWrite(stateFile, JSON.stringify(state));
     let nixConfig = env.NIX_CONFIG || '';
-    if (state.github_token) {
-      const scope = await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/repositories`, {
-        headers: { ...apiHeaders, Authorization: `Bearer ${state.github_token}` },
-      });
-      if (scope?.total_count !== 1 || !Array.isArray(scope.repositories) || scope.repositories.length !== 1 || scope.repositories[0]?.full_name !== expected.repository || scope.repositories[0]?.id !== expected.repositoryId) {
-        throw new Error('GitHub credential has unexpected repository scope');
-      }
-      nixConfig = `${nixConfig}${nixConfig && !nixConfig.endsWith('\n') ? '\n' : ''}access-tokens = github.com=${state.github_token}`;
+    if (hasSources) {
+      // Nix's extra-access-tokens keeps the first value for duplicate prefixes.
+      // Append the complete effective map so renewal replaces owned prefixes.
+      nixConfig += `${nixConfig && !nixConfig.endsWith('\n') ? '\n' : ''}access-tokens = ${Object.entries({ ...savedTokens, ...state.nixTokens }).map(([prefix, token]) => `${prefix}=${token}`).join(' ')}`;
     }
-    const settingsFile = path.join(stateDirectory, 'cache-settings.json');
-    await privateWrite(settingsFile, JSON.stringify(settings));
-    const childEnv = {
-      ...env,
-      NIX_CONFIG: nixConfig,
-      DASH_CACHE_SETTINGS: settingsFile,
-      DASH_CACHE_ENDPOINT: settings.endpoint,
-    };
+    let cacheExpires = '';
     const client = fileURLToPath(new URL('./dash-cache', import.meta.url));
-    const tokenFile = path.join(stateDirectory, 'cache-token');
-    await privateWrite(tokenFile, `${cacheToken}\n`);
-    await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
-    await privateWrite(path.join(cacheRoot, '.build-access-owner'), `${stateDirectory}\n`);
-    await runCommand('python3', [fileURLToPath(new URL('./dash-cache.py', import.meta.url)), 'setup', '--token-file', tokenFile], childEnv, 'Private cache setup');
-    await unlink(tokenFile);
-    await appendWorkflow(env.GITHUB_ENV, 'DASH_CACHE_SETTINGS', settingsFile);
-    await appendWorkflow(env.GITHUB_ENV, 'DASH_CACHE_ENDPOINT', settings.endpoint);
-    if (state.github_token) await appendWorkflow(env.GITHUB_ENV, 'NIX_CONFIG', nixConfig);
-    await appendFile(env.GITHUB_PATH, `${path.dirname(client)}\n`, { mode: 0o600 });
-    for (const [name, value] of Object.entries({ 'cache-url': grant.cache_url, 'cache-expires-at': cacheExpires, 'github-expires-at': githubExpires, 'cache-client': client })) {
-      await appendWorkflow(env.GITHUB_OUTPUT, name, value);
+    if (hasCaches) {
+      state.cache_token = secret(grant.cache_token, 'cache');
+      cacheExpires = expires(grant.cache_expires_at, 'cache', 1830000);
+      const settings = { caches: Object.create(null) };
+      const hosts = new Set();
+      for (const [name, cache] of Object.entries(expected.caches)) {
+        const actual = grant.caches[name];
+        if (!fields(actual, ['url', 'public_key', 'access']) || actual.url !== cache.url || actual.public_key !== cache.public_key || actual.access !== cache.access) throw new Error('Build access returned an unexpected cache identity or permission');
+        const url = new URL(cache.url);
+        settings.caches[name] = { endpoint: url.origin, cache: name, public_key: cache.public_key };
+        hosts.add(url.hostname.replace(/^\[|\]$/g, ''));
+      }
+      state.cache_hosts = [...hosts].sort();
+      await privateWrite(stateFile, JSON.stringify(state));
+      const settingsFile = path.join(stateDirectory, 'cache-settings.json');
+      await privateWrite(settingsFile, JSON.stringify(settings));
+      const tokenFile = path.join(stateDirectory, 'cache-token');
+      await privateWrite(tokenFile, `${state.cache_token}\n`);
+      await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+      await privateWrite(path.join(cacheRoot, '.build-access-owner'), `${stateDirectory}\n`);
+      const childEnv = { ...env, NIX_CONFIG: nixConfig, DASH_CACHE_SETTINGS: settingsFile };
+      delete childEnv.DASH_CACHE_ENDPOINT;
+      await runCommand('python3', [fileURLToPath(new URL('./dash-cache.py', import.meta.url)), 'setup', '--token-file', tokenFile], childEnv, 'Private cache setup');
+      await unlink(tokenFile);
+      await appendWorkflow(env.GITHUB_ENV, 'DASH_CACHE_SETTINGS', settingsFile);
+      await appendFile(env.GITHUB_PATH, `${path.dirname(client)}\n`, { mode: 0o600 });
     }
-    log(`Temporary ${access} access configured; cache credentials expire at ${cacheExpires}`);
+    await privateWrite(stateFile, JSON.stringify(state));
+    if (hasSources) {
+      await appendWorkflow(env.GITHUB_ENV, 'NIX_CONFIG', nixConfig);
+      await appendWorkflow(env.GITHUB_ENV, 'DASH_BUILD_ACCESS_SOURCE_STATE', stateDirectory);
+    }
+    for (const [name, value] of Object.entries({ 'cache-urls': Object.values(expected.caches).map(cache => cache.url).join('\n'), 'cache-expires-at': cacheExpires, 'github-expires-at': githubExpirations.sort()[0] || '', 'cache-client': hasCaches ? client : '' })) await appendWorkflow(env.GITHUB_OUTPUT, name, value);
+    log(`Temporary access configured for ${Object.keys(expected.flakes).length} source(s) and ${Object.keys(expected.caches).length} cache(s)`);
     return { stateDirectory };
   } catch (error) {
-    try { await cleanup({ ...env, STATE_directory: stateDirectory }, options); } catch { log('::warning::Temporary credential cleanup or revocation failed'); }
+    try { await cleanupState(stateDirectory, state, env, options); } catch { log('::warning::Temporary credential cleanup or revocation failed'); }
     throw error;
   }
 }
