@@ -15,6 +15,9 @@ temporary build access. Use an upstream installer directly, pinned to a reviewed
 commit and release, without persisting a GitHub token in Nix's configuration.
 
 This example uses the Determinate Systems installer for upstream Nix. The
+`determinate: false` setting preserves upstream Nix, a mode the installer vendor
+does not support. The build-access Action does not require a particular Nix
+distribution. The
 [example checksum manifest](examples/nix-installer-v3.24.1.sha256) is data for
 the upstream installer's verifier, not an installer Action. Its hashes preserve
 the reviewed v3.24.1 binaries for Linux x86_64/ARM64 and macOS ARM64. An installer
@@ -175,8 +178,9 @@ configuration files are changed.
 
 ## Verification
 
-Maintainers validate this published payload in the development repository's
-integration harness before advancing consumer pins. Its HTTP scenarios exercise OIDC exchange, request and response refusal,
+In the private maintainer checkout, run
+`nix develop --command bash tests/run-public-action.sh` before advancing consumer
+pins. Its HTTP scenarios exercise OIDC exchange, request and response refusal,
 repository scope, token masking, file permissions, cleanup and renewal. The
 Node test child executable stands in for host cache installation. The harness also runs the existing cache CLI scenarios against this payload's
 actual Python helper, using a real local HTTP service and temporary files.
