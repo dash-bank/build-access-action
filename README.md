@@ -90,9 +90,11 @@ ownership marker.
 
 ## Publish cache outputs
 
-`access: publish` requests cache read/write access only. The service separately
-checks the protected branch, environment, caller identity, GitHub-hosted runner,
-and pinned reusable publishing workflow. Reader approval never grants uploads.
+`access: publish` requests cache read/write access only.
+The service requires a separate writer rule for the signed caller identity.
+Policy can trust matching workflows or require protected-branch, environment,
+GitHub-hosted runner and pinned reusable-workflow controls.
+Reader approval never grants uploads.
 
 Set native `cache-mode: none` on the publishing job. Use a fresh publishing runner
 after successful validation. Build outputs without
@@ -140,7 +142,7 @@ Deployment inputs have no defaults in the public source. Replace the configurati
 placeholders with reviewed literal values in workflow YAML and pass them through
 `with`. A private workflow limits public disclosure. Branch protection is
 recommended for reviewing reader configuration changes; reader authorization
-does not require it. Publishing retains its separately enforced protected-branch
+does not require it. Isolated publishing retains its separately enforced protected-branch
 and environment requirements.
 Missing or invalid inputs fail before an
 OIDC request. Repository IDs, URLs and artifact public keys are configuration,
