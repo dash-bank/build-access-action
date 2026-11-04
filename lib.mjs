@@ -144,6 +144,90 @@ async function loadState(directory, env) {
   catch { throw new Error('Cannot read temporary credential cleanup state'); }
 }
 
+function gitEntries(env) {
+  const value = env.GIT_CONFIG_COUNT ?? '0';
+  if (!/^(0|[1-9][0-9]*)$/.test(value) || Number(value) > 4096) throw new Error('Cannot verify inherited Git configuration');
+  return Array.from({ length: Number(value) }, (_, index) => {
+    const key = env[`GIT_CONFIG_KEY_${index}`], value = env[`GIT_CONFIG_VALUE_${index}`];
+    if (typeof key !== 'string' || !key || /[\r\n\0]/.test(key) || typeof value !== 'string' || value.includes('\0')) throw new Error('Cannot verify inherited Git configuration');
+    return [key, value];
+  });
+}
+
+async function gitQuery(args, env) {
+  try {
+    return (await execute('git', ['config', '--null', ...args], { env, cwd: env.GITHUB_WORKSPACE || process.cwd(), timeout: 10000, maxBuffer: 1048576 })).stdout;
+  } catch (error) {
+    if (error.code === 1 && !error.signal) return '';
+    throw new Error('Cannot verify Git source authentication; child output withheld');
+  }
+}
+
+async function prepareGitSources(env, expected) {
+  const inherited = gitEntries(env);
+  let baseCount = inherited.length, sources = {};
+  if (env.DASH_BUILD_ACCESS_SOURCE_STATE) {
+    const previous = await loadState(env.DASH_BUILD_ACCESS_SOURCE_STATE, env);
+    const owned = previous?.gitConfiguration;
+    if (owned !== undefined) {
+      if (!record(owned) || !Number.isSafeInteger(owned.baseCount) || owned.baseCount < 0 || !Array.isArray(owned.entries) || owned.baseCount + owned.entries.length !== inherited.length || JSON.stringify(inherited.slice(owned.baseCount)) !== JSON.stringify(owned.entries) || !record(previous.gitSources)) throw new Error('Cannot verify Action-owned Git source configuration');
+      baseCount = owned.baseCount;
+      sources = previous.gitSources;
+      for (const [repository, source] of Object.entries(sources)) {
+        if (!/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !fields(source, ['directory', 'expires_at']) || typeof source.directory !== 'string' || !Number.isFinite(Date.parse(source.expires_at))) throw new Error('Cannot verify Action-owned Git source configuration');
+      }
+    }
+  }
+  const baseEnv = { ...env, GIT_CONFIG_COUNT: String(baseCount) };
+  const repositories = new Set([...Object.keys(sources), ...Object.values(expected).map(target => target.repository)]);
+  const settings = (await gitQuery(['--list'], baseEnv)).split('\0').filter(Boolean).map(line => {
+    const index = line.indexOf('\n');
+    return index < 0 ? [line, ''] : [line.slice(0, index), line.slice(index + 1)];
+  });
+  for (const [key, value] of settings) {
+    const scoped = key.match(/^credential\.(.+)\.(helper|username|password|oauthrefreshtoken|authtype)$/i);
+    if (!scoped || !value) continue;
+    let url;
+    try { url = new URL(scoped[1]); } catch { continue; }
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com') continue;
+    // Git URL matching decodes percent-encoded unreserved path characters.
+    // Reserved delimiters must retain their meaning (notably an encoded slash).
+    const candidate = url.pathname.replace(/%([0-9a-f]{2})/gi, (escape, hex) => {
+      const decoded = String.fromCharCode(parseInt(hex, 16));
+      return /^[A-Za-z0-9._~-]$/.test(decoded) ? decoded : escape;
+    }).replace(/^\//, '').replace(/\/$/, '');
+    if ([...repositories].some(repository => candidate.toLowerCase() === repository.toLowerCase() || candidate.toLowerCase() === `${repository}.git`.toLowerCase())) throw new Error('Refusing an existing repository Git credential not owned by this Action');
+  }
+  for (const repository of repositories) for (const suffix of ['', '.git', '/', '.git/']) for (const username of ['', 'x-access-token@']) {
+    const headers = (await gitQuery(['--get-urlmatch', 'http.extraHeader', `https://${username}github.com/${repository}${suffix}`], baseEnv)).split('\0');
+    if (headers.some(value => /(?:^|[\r\n])\s*(?:proxy-)?authorization\s*:/i.test(value))) throw new Error('Refusing an existing Git authorization header for a requested repository');
+  }
+  return { baseCount, sources };
+}
+
+function shellQuote(value) { return `'${value.replaceAll("'", "'\\''")}'`; }
+
+function gitConfiguration(baseCount, sources) {
+  const entries = [];
+  const helper = fileURLToPath(new URL('./git-credential.mjs', import.meta.url));
+  for (const [repository, source] of Object.entries(sources).sort(([a], [b]) => a.localeCompare(b))) {
+    const command = `!${[process.execPath, helper, source.directory, repository].map(shellQuote).join(' ')}`;
+    for (const suffix of ['', '.git']) {
+      const url = `https://github.com/${repository}${suffix}`;
+      entries.push([`credential.${url}.useHttpPath`, 'true'], [`credential.${url}.username`, 'x-access-token'], [`credential.${url}.helper`, ''], [`credential.${url}.helper`, command], [`http.${url}.followRedirects`, 'false'], [`http.https://x-access-token@github.com/${repository}${suffix}.followRedirects`, 'false'], [`url.${url}/.insteadOf`, `${url}/`]);
+    }
+  }
+  return { baseCount, entries };
+}
+
+async function exportGitConfiguration(file, configuration) {
+  for (const [offset, [key, value]] of configuration.entries.entries()) {
+    await appendWorkflow(file, `GIT_CONFIG_KEY_${configuration.baseCount + offset}`, key);
+    await appendWorkflow(file, `GIT_CONFIG_VALUE_${configuration.baseCount + offset}`, value);
+  }
+  await appendWorkflow(file, 'GIT_CONFIG_COUNT', String(configuration.baseCount + configuration.entries.length));
+}
+
 async function prepareCacheRoot(cacheRoot, env) {
   if (!await exists(cacheRoot)) return false;
   // Repeating this action can renew credentials, but must never replace a
@@ -228,7 +312,7 @@ export async function run(env = process.env, options = {}) {
   const hasSources = Object.keys(expected.flakes).length > 0;
   const hasCaches = Object.keys(expected.caches).length > 0;
   const version = await runCommand('nix', ['--version'], env, 'Installed Nix check');
-  let savedTokens = {}, ownedTokens = {};
+  let savedTokens = {}, ownedTokens = {}, gitSources;
   if (hasSources) {
     const match = version.stdout.match(/^nix \(Nix\) (\d+)\.(\d+)/);
     if (!match || Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 34)) throw new Error('Source access requires upstream Nix 2.34 or newer for repository-specific credentials');
@@ -244,6 +328,7 @@ export async function run(env = process.env, options = {}) {
       if (Object.hasOwn(savedTokens, prefix) && ownedTokens[prefix] !== savedTokens[prefix]) throw new Error('Refusing an existing repository credential not owned by this Action');
     }
   }
+  if (hasSources) gitSources = await prepareGitSources(env, expected.flakes);
   const oidcURL = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
   const fixtureOrigin = options.endpoints?.oidcOrigin;
   const githubOIDC = oidcURL.protocol === 'https:' && oidcURL.hostname.endsWith('.actions.githubusercontent.com') && !oidcURL.port && !oidcURL.username && !oidcURL.password && !oidcURL.hash;
@@ -286,6 +371,7 @@ export async function run(env = process.env, options = {}) {
     if (!fields(grant, topFields) || !fields(grant.flakes, Object.keys(expected.flakes)) || !fields(grant.caches, Object.keys(expected.caches))) throw new Error('Build access returned an unexpected credential response');
     const githubExpirations = [];
     state.nixTokens = { ...ownedTokens };
+    if (hasSources) state.gitSources = { ...gitSources.sources };
     for (const [name, target] of Object.entries(expected.flakes)) {
       const source = grant.flakes[name];
       if (!fields(source, ['repository', 'repository_id', 'owner_id', 'token', 'expires_at']) || source.repository !== target.repository || source.repository_id !== target.repository_id || source.owner_id !== target.owner_id) throw new Error('GitHub credential has unexpected repository scope');
@@ -295,7 +381,9 @@ export async function run(env = process.env, options = {}) {
       if (scope?.total_count !== 1 || !Array.isArray(scope.repositories) || scope.repositories.length !== 1 || scope.repositories[0]?.full_name !== target.repository || scope.repositories[0]?.id !== Number(target.repository_id)) throw new Error('GitHub credential has unexpected repository scope');
       if (token.includes('#')) throw new Error('Invalid GitHub credential received');
       state.nixTokens[`github.com/${target.repository}`] = token;
+      state.gitSources[target.repository] = { directory: stateDirectory, expires_at: source.expires_at };
     }
+    if (hasSources) state.gitConfiguration = gitConfiguration(gitSources.baseCount, state.gitSources);
     let nixConfig = env.NIX_CONFIG || '';
     if (hasSources) {
       // Nix's extra-access-tokens keeps the first value for duplicate prefixes.
@@ -334,6 +422,7 @@ export async function run(env = process.env, options = {}) {
     await privateWrite(stateFile, JSON.stringify(state));
     if (hasSources) {
       await appendWorkflow(env.GITHUB_ENV, 'NIX_CONFIG', nixConfig);
+      await exportGitConfiguration(env.GITHUB_ENV, state.gitConfiguration);
       await appendWorkflow(env.GITHUB_ENV, 'DASH_BUILD_ACCESS_SOURCE_STATE', stateDirectory);
     }
     for (const [name, value] of Object.entries({ 'cache-urls': Object.values(expected.caches).map(cache => cache.url).join('\n'), 'cache-expires-at': cacheExpires, 'github-expires-at': githubExpirations.sort()[0] || '', 'cache-client': hasCaches ? client : '' })) await appendWorkflow(env.GITHUB_OUTPUT, name, value);

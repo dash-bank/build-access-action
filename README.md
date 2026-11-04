@@ -29,7 +29,7 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-      - uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
+      - uses: dash-bank/build-access-action@f63ad4430eb204c5e7066e7259bd5fffe7420ee5
         with:
           service-url: https://access.example
           flakes: |
@@ -75,7 +75,7 @@ after successful validation and the isolated build, in the publishing context
 required by policy. Do not carry credentials or executable state between jobs.
 
 ```yaml
-- uses: dash-bank/build-access-action@9b6ba7eea710bae82bb6c03f56acae876725bcfa
+- uses: dash-bank/build-access-action@f63ad4430eb204c5e7066e7259bd5fffe7420ee5
   id: publishing
   with:
     service-url: https://access.example
@@ -98,7 +98,24 @@ closures are readable by everyone who can read that namespace.
 Use fresh GitHub-hosted Linux/macOS runners with Python 3 and upstream Nix.
 Source access requires Nix >= 2.34 for [repository-specific token prefixes](https://nix.dev/manual/nix/2.34/command-ref/conf-file#conf-access-tokens).
 The Action preserves existing Nix access tokens and refuses unowned exact repository-prefix conflicts.
-Use the GitHub flake fetcher (`github:OWNER/REPO`); SSH inputs need separate authentication.
+Use `github:OWNER/REPO` or Git HTTPS inputs such as
+`git+https://github.com/OWNER/REPO.git/`. Use the trailing slash when an inherited
+Git rule rewrites GitHub HTTPS URLs to SSH; the Action preserves HTTPS for that
+slash-ending source prefix. Other repositories retain their existing rewrite.
+SSH inputs retain their existing authentication.
+For approved sources, the Action installs runtime Git credential helpers for
+exact HTTPS `github.com` repository paths, with and without `.git` and one optional
+trailing slash. Child paths and double slashes receive no credential. Helpers use
+private Action state; tokens never enter Git configuration or helper arguments.
+Requests for another host, protocol, port or repository path receive no credential.
+Git redirects are disabled for the configured source paths.
+
+The Action preserves unrelated Git configuration. It refuses unowned exact
+repository credentials and applicable authorization headers before requesting OIDC.
+Repeated invocations preserve earlier grants and replace only owned configuration.
+Credential storage operations do nothing. Cleanup removes the issuance state;
+helpers then return no credential, including when an old environment still names them.
+Cache-only invocations install no Git source authentication.
 Each returned source token is independently checked for exact repository scope.
 Post-job cleanup revokes only received source tokens and removes owned private files
 and matching daemon credentials. Credentials never belong in flake URLs, lockfiles,
