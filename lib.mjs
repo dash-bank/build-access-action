@@ -198,9 +198,25 @@ async function prepareGitSources(env, expected) {
     }).replace(/^\//, '').replace(/\/$/, '');
     if ([...repositories].some(repository => candidate.toLowerCase() === repository.toLowerCase() || candidate.toLowerCase() === `${repository}.git`.toLowerCase())) throw new Error('Refusing an existing repository Git credential not owned by this Action');
   }
-  for (const repository of repositories) for (const suffix of ['', '.git', '/', '.git/']) for (const username of ['', 'x-access-token@']) {
-    const headers = (await gitQuery(['--get-urlmatch', 'http.extraHeader', `https://${username}github.com/${repository}${suffix}`], baseEnv)).split('\0');
-    if (headers.some(value => /(?:^|[\r\n])\s*(?:proxy-)?authorization\s*:/i.test(value))) throw new Error('Refusing an existing Git authorization header for a requested repository');
+  // Git sends every matching http.extraHeader, not only the most specific one,
+  // so inspect each configured entry that could reach a requested source.
+  const reaches = scope => {
+    if (scope === undefined) return true;
+    let url;
+    try { url = new URL(scope); } catch { return true; }
+    if (url.protocol !== 'https:') return false;
+    if (url.hostname.toLowerCase() !== 'github.com') return url.hostname.includes('*');
+    let scoped;
+    try { scoped = decodeURIComponent(url.pathname).replace(/^\/+|\/+$/g, '').toLowerCase(); } catch { return true; }
+    return scoped === '' || [...repositories].some(repository => [repository, `${repository}.git`].some(source => {
+      source = source.toLowerCase();
+      return source === scoped || source.startsWith(`${scoped}/`) || scoped.startsWith(`${source}/`);
+    }));
+  };
+  for (const entry of (await gitQuery(['--get-regexp', '^http\\.(.+\\.)?extraheader$'], baseEnv)).split('\0').filter(Boolean)) {
+    const index = entry.indexOf('\n'), key = index < 0 ? entry : entry.slice(0, index), value = index < 0 ? '' : entry.slice(index + 1);
+    const scope = /^http\.extraheader$/i.test(key) ? undefined : key.slice('http.'.length, -'.extraheader'.length);
+    if (/(?:^|[\r\n])\s*(?:proxy-)?authorization\s*:/i.test(value) && reaches(scope)) throw new Error('Refusing an existing Git authorization header for a requested repository');
   }
   return { baseCount, sources };
 }
