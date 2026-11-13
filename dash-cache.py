@@ -450,7 +450,7 @@ def main() -> int:
     else:
         if not (root / "token").exists():
             raise ValueError(
-                "Cache credentials missing; run dash-setup cache (or dash-cache setup)."
+                "Cache credentials missing; obtain cache access with the build-access Action first."
             )
         if args.command == "status":
             if not args.offline:
