@@ -1,0 +1,279 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Review policy for build-access-action, derived by the coderabbit-config
+# skill. Each instruction names the skill it comes from; `policy` is the review
+# policy of coderabbit-config itself, and `repository` marks a rule written in
+# this repository (README.md).
+#
+# Catalogs read:
+#   practice catalog (not public)  879841a61c3f83cd809edca9229c4a6bb7f909f8
+#   gleam-agent-tools              6a9ea2f647e787a32d3c7fa88d9c58c5b81ae9d7
+#     (no skill from it governs this repository)
+#
+# Governing skills: coderabbit-config (policy), gate, python, writing, git,
+# all from the practice catalog. The credential rules are the contract
+# README.md states for the Action, cited as `repository`.
+#
+# Governing dependency versions: none locked; the repository has no
+# dependency manifest. The Action runs on Node 24 (action.yml) and the
+# runner's Python 3.
+language: en-US
+tone_instructions: >-
+  Literal and concise. Report only defects you can evidence from the diff, its
+  callers, README.md, or a cited rule. One finding per cause. An empty review
+  is valid.
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_instructions: |
+    Lead with the problem the change solves, then the response in one short
+    paragraph, then its effect on the Action's inputs, outputs or credential
+    handling, if any. Do not narrate the diff file by file.
+  review_status: true
+  commit_status: true
+  fail_commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  poem: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    base_branches:
+      - main
+
+  # The repository has no generated, vendored, rendered or lock files. The
+  # installer checksum list in examples/ is a pinned trust input and stays
+  # reviewed.
+  path_filters: []
+
+  path_instructions:
+    - path: "{action.yml,*.mjs,dash-cache,dash-cache.py}"
+      instructions: |
+        Review policy (policy).
+        - Design first. README.md is the Action's contract: its inputs and
+          outputs, the request rules, source and cache credentials, renewal
+          and cleanup. Flag code that contradicts it, and a change to stated
+          behavior with no change to README.md. A fix that restores the
+          stated behavior needs none.
+        - Core abstractions. lib.mjs owns `run` and `cleanup`; main.mjs and
+          post.mjs only call them and report the error; git-credential.mjs
+          answers one credential for one approved source; dash-cache.py owns
+          cache status and push, behind the dash-cache wrapper. Flag a second
+          implementation of one of these jobs, and a name that differs from
+          the README's terms (source, cache, namespace, trust anchor).
+        - Lean. Flag code no input, output or README statement needs: an
+          unset option, an unvaried parameter, a wrapper that adds no rule,
+          an unreachable branch. Say what to delete.
+        - Migration, never a legacy path. Flag a fallback to an older service
+          contract, a deprecated input alias, and a flag that keeps old
+          behavior. Callers pin this Action by commit, so a change to an
+          input, an output or the runtime is declared breaking with a
+          migration note in README.md.
+        - Composable. Flag an input whose effect depends on another input
+          beyond what README.md states, global state shared between
+          invocations other than the Action's private runtime state, and a
+          module with two responsibilities.
+        - Test first. This repository holds no behavior tests, so the
+          reviewer cannot see the test of a change. Flag a behavior change
+          whose pull request description does not say how it was tested.
+        - Typed before foreign. Flag an input (`flakes`, `caches`), an
+          exchange response or a Git credential request used without parsing
+          into a checked shape, an unchecked property access on untrusted
+          JSON, and a crash on a routine failure instead of a step error.
+        - Silence. Report nothing that `node --check`, `py_compile` or
+          actionlint decides, and no layout or naming preference without a
+          written rule.
+
+    - path: "{action.yml,*.mjs,dash-cache,dash-cache.py}"
+      instructions: |
+        Credential custody (repository: README.md).
+        - Flag a credential written to an output, a log line, Git
+          configuration, a command argument, a flake URL or a file outside
+          the Action's private runtime state, and a token printed without
+          `::add-mask::`.
+        - Flag a repository ID, owner ID or other trust anchor taken from
+          pull request content, dispatch input or the exchange response.
+        - Flag a deployment default (a service URL, a cache URL or public
+          key, a repository or owner ID) in action.yml or the code; callers
+          supply them, and README.md examples use placeholders.
+        - Flag a Git credential answer for anything other than an exact
+          HTTPS `github.com` path of an approved repository, with or without
+          `.git` and one optional trailing slash, and a re-enabled redirect
+          for a configured source path.
+        - Flag a returned source token used without its exact repository
+          scope check.
+        - Flag a change that alters unrelated Git configuration or existing
+          Nix access tokens, accepts an unowned exact repository-prefix
+          conflict, or lets renewal or cleanup replace or revoke a
+          credential the Action did not install.
+        - Flag a failed access request that does not fail the step.
+
+    - path: "dash-cache.py"
+      instructions: |
+        Python (python).
+        - Flag `Any`, and an external value (settings JSON, HTTP body,
+          process output, environment) used without parsing into a checked
+          shape.
+        - Flag a new abstract base class hierarchy; use `Protocol`.
+        - Flag mutable dataclasses, and exclusive states as flags instead of
+          tagged frozen dataclasses matched with `assert_never`.
+        - Flag a parser model passed past the boundary.
+
+    - path: ".github/**"
+      instructions: |
+        Gate (gate).
+        - Flag a check that passes or skips when its tool is missing; it
+          fails or reports unmeasured.
+        - Flag a new tool that is not run from a pinned source, as
+          actionlint runs from a pinned Nix package.
+        - Flag a new check that encodes a layout, naming or README
+          convention, and a check that scripts what a tool already performs.
+        - Flag a replaced check that drops security coverage, such as
+          `persist-credentials: false`, pinned Action commits or the
+          workflow validation.
+
+    - path: "README.md"
+      instructions: |
+        Prose (writing).
+        - Flag a metaphor, idiom or figure of speech; name the concept. An
+          established technical term is a name, not a metaphor.
+        - Flag one concept under two terms, a project term not defined where
+          it first appears, and an "it" or "this" with two possible
+          referents.
+        - Flag a sentence holding two propositions, and background placed
+          after the finding that depends on it.
+        - Flag a caveat that names no decision the reader makes, filler, and
+          value judgments.
+        - Flag a shortened sentence that weakens "must", "never" or
+          "always", and an example value that is not a placeholder.
+
+  pre_merge_checks:
+    title:
+      mode: "off"
+    description:
+      mode: warning
+    issue_assessment:
+      mode: "off"
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: No weakened test or gate
+        mode: error
+        instructions: |
+          Source: policy, gate. Fail if the diff skips, deletes, disables or
+          loosens a CI step (the `node --check` loop, `py_compile`, the
+          actionlint workflow validation), removes a trigger, or adds
+          `continue-on-error`, and the pull request description does not
+          name the behavior that no longer exists or the stronger check that
+          replaces it. Pass otherwise.
+      - name: No credential leaves private state
+        mode: error
+        instructions: |
+          Source: repository (README.md). Fail if the diff writes a token or
+          credential to an Action output, a log line, Git configuration, a
+          command argument, a URL or a file outside the Action's private
+          runtime state, or adds a default service URL, cache URL, public key
+          or repository ID to action.yml. Pass otherwise.
+      - name: Behavior change carries its README
+        mode: warning
+        instructions: |
+          Source: policy. Warn if the diff changes the Action's behavior with
+          no change to README.md, and the pull request description does not
+          say the change restores stated behavior or preserves behavior.
+          Pass for workflow-only and documentation-only changes.
+      - name: Breaking change is declared
+        mode: warning
+        instructions: |
+          Source: policy. Warn if the diff removes or renames an input or
+          output in action.yml, changes an input's default or meaning, or
+          changes the runtime, and the pull request description does not
+          call the change breaking and give its migration. Pass otherwise.
+      - name: Problem-first description
+        mode: warning
+        instructions: |
+          Source: git. Warn unless the pull request description gives the
+          problem, why it matters, one concrete example, the solution in one
+          paragraph, its trade-offs, and what was verified, with no file
+          tour, and its claims match the diff.
+      - name: No attribution text
+        mode: warning
+        instructions: |
+          Source: git, gate. Warn if the pull request title or description
+          contains a co-author credit, `Co-Authored-By`, `Signed-off-by`, a
+          "Generated with" or "Generated by" line, or a line starting with
+          the robot emoji.
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+
+  tools:
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    # The repository runs only `node --check`, `py_compile` and actionlint;
+    # other linters' findings would be preferences without a written rule
+    # (policy, Silence).
+    ruff:
+      enabled: false
+    flake8:
+      enabled: false
+    pylint:
+      enabled: false
+    shellcheck:
+      enabled: false
+    biome:
+      enabled: false
+    eslint:
+      enabled: false
+    oxc:
+      enabled: false
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+    vale:
+      enabled: false
+    yamllint:
+      enabled: false
+    github-checks:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # AGENTS.md and CLAUDE.md are read by default.
+    filePatterns:
+      - files: "README.md"
+        applyTo: "action.yml,*.mjs,dash-cache,dash-cache.py,.github/workflows/**"
+  learnings:
+    scope: local
+  pull_requests:
+    scope: local
