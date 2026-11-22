@@ -239,9 +239,8 @@ reviews:
       enabled: true
     trufflehog:
       enabled: true
-    # The repository does not run actionlint.
     actionlint:
-      enabled: false
+      enabled: true
     zizmor:
       enabled: true
     # The repository runs only `node --check` and `py_compile`;
