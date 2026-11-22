@@ -95,8 +95,8 @@ reviews:
           exchange response or a Git credential request used without parsing
           into a checked shape, an unchecked property access on untrusted
           JSON, and a crash on a routine failure instead of a step error.
-        - Silence. Report nothing that `node --check`, `py_compile` or
-          actionlint decides, and no layout or naming preference without a
+        - Silence. Report nothing that `node --check` or `py_compile`
+          decides, and no layout or naming preference without a
           written rule.
 
     - path: "{action.yml,*.mjs,dash-cache,dash-cache.py}"
@@ -139,13 +139,11 @@ reviews:
         Gate (gate).
         - Flag a check that passes or skips when its tool is missing; it
           fails or reports unmeasured.
-        - Flag a new tool that is not run from a pinned source, as
-          actionlint runs from a pinned Nix package.
+        - Flag a new tool that is not run from a pinned source.
         - Flag a new check that encodes a layout, naming or README
           convention, and a check that scripts what a tool already performs.
         - Flag a replaced check that drops security coverage, such as
-          `persist-credentials: false`, pinned Action commits or the
-          workflow validation.
+          `persist-credentials: false` or pinned Action commits.
 
     - path: "README.md"
       instructions: |
@@ -187,8 +185,7 @@ reviews:
         mode: error
         instructions: |
           Source: policy, gate. Fail if the diff skips, deletes, disables or
-          loosens a CI step (the `node --check` loop, `py_compile`, the
-          actionlint workflow validation), removes a trigger, or adds
+          loosens a CI step (the `node --check` loop, `py_compile`), removes a trigger, or adds
           `continue-on-error`, and the pull request description does not
           name the behavior that no longer exists or the stronger check that
           replaces it. Pass otherwise.
@@ -242,11 +239,12 @@ reviews:
       enabled: true
     trufflehog:
       enabled: true
+    # The repository does not run actionlint.
     actionlint:
-      enabled: true
+      enabled: false
     zizmor:
       enabled: true
-    # The repository runs only `node --check`, `py_compile` and actionlint;
+    # The repository runs only `node --check` and `py_compile`;
     # other linters' findings would be preferences without a written rule
     # (policy, Silence).
     ruff:
