@@ -6,17 +6,19 @@
 # this repository (README.md).
 #
 # Catalogs read:
-#   practice catalog (not public)  879841a61c3f83cd809edca9229c4a6bb7f909f8
-#   gleam-agent-tools              6a9ea2f647e787a32d3c7fa88d9c58c5b81ae9d7
+#   practice catalog (not public)  a56636a4eed7a0d644b89f5bb7c7d7c9692e0887
+#   gleam-agent-tools              d7b541cb885b3edbf25563b06aee97b28b66074f
 #     (no skill from it governs this repository)
 #
-# Governing skills: coderabbit-config (policy), gate, python, writing, git,
-# all from the practice catalog. The credential rules are the contract
-# README.md states for the Action, cited as `repository`.
-#
-# Governing dependency versions: none locked; the repository has no
-# dependency manifest. The Action runs on Node 24 (action.yml) and the
-# runner's Python 3.
+# Governing skills, all from the practice catalog, with the evidence that
+# selected each:
+#   coderabbit-config  the review policy itself
+#   gate               .github/workflows
+#   python             dash-cache.py
+#   writing            README.md
+#   git                every repository
+# The credential rules are the contract README.md states for the Action,
+# cited as `repository`.
 language: en-US
 tone_instructions: >-
   Literal and concise. Report only defects you can evidence from the diff, its
