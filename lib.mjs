@@ -85,29 +85,84 @@ async function exists(file) {
   try { await lstat(file); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
-async function jsonRequest(url, { method = 'GET', headers = {}, body, empty = false, acceptUnauthorized = false } = {}) {
-  let response;
-  try {
-    response = await fetch(url, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
-  } catch {
-    throw new Error('Build-access HTTPS request failed');
-  }
-  if (!response.ok && !(acceptUnauthorized && response.status === 401)) {
-    await response.body?.cancel();
-    throw new Error(`Build-access request refused (HTTP ${response.status})`);
-  }
-  if (empty) { await response.body?.cancel(); return; }
-  let size = 0;
+// Statuses a busy, starting or briefly degraded service answers with. Every
+// request here is safe to repeat: the exchange reuses an OIDC proof valid for
+// minutes, and the others read or revoke. Waits of 2, 4, 8 and 16 s, each
+// stretched by up to half again so parallel jobs spread out, cover at least
+// 30 s.
+const transientStatuses = new Set([408, 429, 502, 503, 504]);
+const retryDelays = [2000, 4000, 8000, 16000];
+
+function stdoutLog(line) {
+  process.stdout.write(`${line}\n`);
+}
+
+// Reads a body of at most `limit` bytes. A longer body is cancelled and gives
+// null; a transport failure while reading throws.
+async function readBounded(response, limit) {
+  if (!response.body) return Buffer.alloc(0);
   const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > limit) return null; // Leaving the loop cancels the stream.
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+// The service answers a refusal with {"error": "<code>"}; the code names the
+// cause without carrying any credential. Anything else is not shown.
+async function refusalCode(response) {
   try {
-    for await (const chunk of response.body) {
-      size += chunk.length;
-      if (size > maxResponseBytes) throw new Error('Response too large');
-      chunks.push(chunk);
-    }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const bytes = await readBounded(response, 1024);
+    if (!bytes) return '';
+    const code = JSON.parse(bytes.toString('utf8'))?.error;
+    return typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code) ? code : '';
   } catch {
-    throw new Error('Invalid build-access response');
+    return '';
+  }
+}
+
+function describe(status, code) {
+  return code ? `HTTP ${status}, ${code}` : `HTTP ${status}`;
+}
+
+async function jsonRequest(url, { method = 'GET', headers = {}, body, empty = false, acceptUnauthorized = false, log = stdoutLog, delays = retryDelays } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    let failure;
+    try {
+      response = await fetch(url, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+    } catch {
+      failure = 'HTTPS request failed';
+    }
+    if (response && (response.ok || (acceptUnauthorized && response.status === 401))) {
+      if (empty) { await response.body?.cancel(); return; }
+      let bytes;
+      try {
+        bytes = await readBounded(response, maxResponseBytes);
+      } catch {
+        // The connection failed mid-body: as transient as failing before it.
+        failure = 'response body read failed';
+        response = undefined;
+      }
+      if (response) {
+        // A complete body that is too large or not JSON is final.
+        if (!bytes) throw new Error('Invalid build-access response');
+        try { return JSON.parse(bytes.toString('utf8')); } catch { throw new Error('Invalid build-access response'); }
+      }
+    }
+    const code = response ? await refusalCode(response) : '';
+    const transient = !response || transientStatuses.has(response.status);
+    if (!transient || attempt >= delays.length) {
+      if (!response) throw new Error('Build-access HTTPS request failed');
+      throw new Error(`Build-access request refused (${describe(response.status, code)})`);
+    }
+    failure ??= describe(response.status, code);
+    const wait = Math.round(delays[attempt] * (1 + Math.random() / 2));
+    log(`Build-access request to ${new URL(url).host} failed (${failure}); retrying in ${(wait / 1000).toFixed(1)} s, attempt ${attempt + 2} of ${delays.length + 1}`);
+    await new Promise((resolve) => setTimeout(resolve, wait));
   }
 }
 
@@ -309,7 +364,7 @@ async function cleanupState(directory, state, env, options) {
   for (const token of new Set(state.github_tokens || [])) {
     try {
       await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/token`, {
-        method: 'DELETE', headers: { ...apiHeaders, Authorization: `Bearer ${token}` }, empty: true, acceptUnauthorized: true,
+        method: 'DELETE', headers: { ...apiHeaders, Authorization: `Bearer ${token}` }, empty: true, acceptUnauthorized: true, log: options.log || stdoutLog,
       });
     } catch { failed = true; }
   }
@@ -363,12 +418,12 @@ export async function run(env = process.env, options = {}) {
   await privateWrite(stateFile, JSON.stringify(state));
   await appendWorkflow(env.GITHUB_STATE, 'directory', stateDirectory);
   try {
-    const identity = await jsonRequest(oidcURL, { headers: { Authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
+    const identity = await jsonRequest(oidcURL, { headers: { Authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` }, log });
     const proof = secret(identity?.value, 'OIDC');
     mask(log, proof);
     const payload = { flakes: Object.keys(expected.flakes), caches: Object.fromEntries(Object.entries(expected.caches).map(([name, cache]) => [name, cache.access])) };
     if (env.GITHUB_EVENT_NAME === 'pull_request') payload.github_token = secret(input(env, 'github-token'), 'workflow');
-    const grant = await jsonRequest(`${options.endpoints?.broker || expected.broker}/v1/exchange`, { method: 'POST', headers: { Authorization: `Bearer ${proof}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const grant = await jsonRequest(`${options.endpoints?.broker || expected.broker}/v1/exchange`, { method: 'POST', headers: { Authorization: `Bearer ${proof}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload), log });
     // Capture and mask every returned source token before validating the grant,
     // including unexpected resources, so refusal can revoke all usable tokens.
     if (typeof grant?.cache_token === 'string') mask(log, grant.cache_token);
@@ -393,7 +448,7 @@ export async function run(env = process.env, options = {}) {
       if (!fields(source, ['repository', 'repository_id', 'owner_id', 'token', 'expires_at']) || source.repository !== target.repository || source.repository_id !== target.repository_id || source.owner_id !== target.owner_id) throw new Error('GitHub credential has unexpected repository scope');
       githubExpirations.push(expires(source.expires_at, 'GitHub', 3630000));
       const token = secret(source.token, 'GitHub');
-      const scope = await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/repositories`, { headers: { ...apiHeaders, Authorization: `Bearer ${token}` } });
+      const scope = await jsonRequest(`${options.endpoints?.github || 'https://api.github.com'}/installation/repositories`, { headers: { ...apiHeaders, Authorization: `Bearer ${token}` }, log });
       if (scope?.total_count !== 1 || !Array.isArray(scope.repositories) || scope.repositories.length !== 1 || scope.repositories[0]?.full_name !== target.repository || scope.repositories[0]?.id !== Number(target.repository_id)) throw new Error('GitHub credential has unexpected repository scope');
       if (token.includes('#')) throw new Error('Invalid GitHub credential received');
       state.nixTokens[`github.com/${target.repository}`] = token;
