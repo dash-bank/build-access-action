@@ -97,13 +97,27 @@ function stdoutLog(line) {
   process.stdout.write(`${line}\n`);
 }
 
+// Reads a body of at most `limit` bytes. A longer body is cancelled and gives
+// null; a transport failure while reading throws.
+async function readBounded(response, limit) {
+  if (!response.body) return Buffer.alloc(0);
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > limit) return null; // Leaving the loop cancels the stream.
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 // The service answers a refusal with {"error": "<code>"}; the code names the
 // cause without carrying any credential. Anything else is not shown.
 async function refusalCode(response) {
   try {
-    const text = await response.text();
-    if (text.length > 1024) return '';
-    const code = JSON.parse(text)?.error;
+    const bytes = await readBounded(response, 1024);
+    if (!bytes) return '';
+    const code = JSON.parse(bytes.toString('utf8'))?.error;
     return typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code) ? code : '';
   } catch {
     return '';
@@ -115,15 +129,30 @@ function describe(status, code) {
 }
 
 async function jsonRequest(url, { method = 'GET', headers = {}, body, empty = false, acceptUnauthorized = false, log = stdoutLog, delays = retryDelays } = {}) {
-  let response;
   for (let attempt = 0; ; attempt += 1) {
+    let response;
     let failure;
     try {
       response = await fetch(url, { method, headers, body, redirect: 'manual', signal: AbortSignal.timeout(30000) });
     } catch {
       failure = 'HTTPS request failed';
     }
-    if (response && (response.ok || (acceptUnauthorized && response.status === 401))) break;
+    if (response && (response.ok || (acceptUnauthorized && response.status === 401))) {
+      if (empty) { await response.body?.cancel(); return; }
+      let bytes;
+      try {
+        bytes = await readBounded(response, maxResponseBytes);
+      } catch {
+        // The connection failed mid-body: as transient as failing before it.
+        failure = 'response body read failed';
+        response = undefined;
+      }
+      if (response) {
+        // A complete body that is too large or not JSON is final.
+        if (!bytes) throw new Error('Invalid build-access response');
+        try { return JSON.parse(bytes.toString('utf8')); } catch { throw new Error('Invalid build-access response'); }
+      }
+    }
     const code = response ? await refusalCode(response) : '';
     const transient = !response || transientStatuses.has(response.status);
     if (!transient || attempt >= delays.length) {
@@ -131,23 +160,9 @@ async function jsonRequest(url, { method = 'GET', headers = {}, body, empty = fa
       throw new Error(`Build-access request refused (${describe(response.status, code)})`);
     }
     failure ??= describe(response.status, code);
-    response = undefined;
     const wait = Math.round(delays[attempt] * (1 + Math.random() / 2));
     log(`Build-access request to ${new URL(url).host} failed (${failure}); retrying in ${(wait / 1000).toFixed(1)} s, attempt ${attempt + 2} of ${delays.length + 1}`);
     await new Promise((resolve) => setTimeout(resolve, wait));
-  }
-  if (empty) { await response.body?.cancel(); return; }
-  let size = 0;
-  const chunks = [];
-  try {
-    for await (const chunk of response.body) {
-      size += chunk.length;
-      if (size > maxResponseBytes) throw new Error('Response too large');
-      chunks.push(chunk);
-    }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    throw new Error('Invalid build-access response');
   }
 }
 
