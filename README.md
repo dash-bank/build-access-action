@@ -121,7 +121,11 @@ Post-job cleanup revokes only received source tokens and removes owned private f
 and matching daemon credentials. Credentials never belong in flake URLs, lockfiles,
 derivations, artifacts, command arguments or logs.
 Repeat the Action before expiration. Renewal may replace only Action-owned cache files.
-A failed request fails the job; do not use `continue-on-error` for access setup.
+A request that fails with a network error or HTTP 408, 429, 502, 503 or 504 is
+tried up to four more times, waiting about 2, 4, 8 and 16 s, each wait stretched
+by up to half again. Each retry is logged with the status and the service's error
+code. Any other failure, or the last retry failing, fails the job; do not use
+`continue-on-error` for access setup.
 
 Outputs: `cache-urls` (newline-separated), `cache-expires-at`, `github-expires-at`
 (earliest source expiration), and `cache-client`. Credential values are never outputs.
