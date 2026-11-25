@@ -29,7 +29,7 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-      - uses: dash-bank/build-access-action@78a202f4bac3211db0d9ed797664556212fcd491
+      - uses: dash-bank/build-access-action@33a084fe1367c9904593d31a9980351c2295bc4a
         with:
           service-url: https://access.example
           flakes: |
@@ -75,7 +75,7 @@ after successful validation and the isolated build, in the publishing context
 required by policy. Do not carry credentials or executable state between jobs.
 
 ```yaml
-- uses: dash-bank/build-access-action@78a202f4bac3211db0d9ed797664556212fcd491
+- uses: dash-bank/build-access-action@33a084fe1367c9904593d31a9980351c2295bc4a
   id: publishing
   with:
     service-url: https://access.example
